@@ -13,9 +13,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config \
-            libavcodec-dev libavutil-dev libswscale-dev ffmpeg
+          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+            apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+            apt-get install -y -qq --no-install-recommends \
+              -o Dpkg::Options::=--force-confdef \
+              -o Dpkg::Options::=--force-confold \
+              build-essential cmake pkg-config \
+              libavcodec-dev libavutil-dev libswscale-dev ffmpeg
 
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
