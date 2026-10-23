@@ -8,28 +8,31 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
-            apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
-            apt-get install -y -qq --no-install-recommends \
-              -o Dpkg::Options::=--force-confdef \
-              -o Dpkg::Options::=--force-confold \
-              build-essential cmake pkg-config \
-              libavcodec-dev libavutil-dev libswscale-dev ffmpeg
+      - name: Set up FFmpeg dev environment
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: ci
+          create-args: >-
+            -c conda-forge
+            ffmpeg=7.*
+            pkg-config
+          cache-environment: true
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: |
+          export PKG_CONFIG_PATH="$CONDA_PREFIX/lib/pkgconfig"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build -j
 
       - name: Smoke test (synthetic frames, x264 fallback)
         run: |
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           ./build/llcast_encode
           ffprobe -v error -f h264 \
             -show_entries stream=codec_name,width,height \
