@@ -20,6 +20,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <libswscale/swscale.h>
@@ -39,7 +40,15 @@ struct capture {
     struct buf bufs[NBUF];
     unsigned nbuf;
     struct SwsContext *sws; /* YUYV -> NV12，NV12 原生时为 NULL */
+    int64_t last_ts_us;
 };
+
+static int64_t now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
 
 static int xioctl(int fd, unsigned long req, void *arg)
 {
@@ -191,6 +200,11 @@ int capture_get_frame(capture_t *c, AVFrame *frame)
     if (xioctl(c->fd, VIDIOC_DQBUF, &b) < 0)
         return -errno;
 
+    if ((b.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) == V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC)
+        c->last_ts_us = (int64_t)b.timestamp.tv_sec * 1000000 + b.timestamp.tv_usec;
+    else
+        c->last_ts_us = now_us();
+
     const uint8_t *src = c->bufs[b.index].start;
 
     if (c->src_pixfmt == V4L2_PIX_FMT_NV12) {
@@ -210,6 +224,11 @@ int capture_get_frame(capture_t *c, AVFrame *frame)
 
     xioctl(c->fd, VIDIOC_QBUF, &b);
     return 0;
+}
+
+int64_t capture_timestamp_us(const capture_t *c)
+{
+    return c->last_ts_us;
 }
 
 void capture_get_size(const capture_t *c, int *width, int *height)

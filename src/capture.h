@@ -2,6 +2,7 @@
 #define LLCAST_CAPTURE_H
 
 #include <libavutil/frame.h>
+#include <stdint.h>
 
 typedef struct capture capture_t;
 
@@ -10,6 +11,9 @@ capture_t *capture_open(const char *device, int width, int height);
 
 /* 取一帧到 frame（NV12）。返回 0 成功；-EAGAIN 超时；其他负数为错误 */
 int capture_get_frame(capture_t *c, AVFrame *frame);
+
+/* 最近一帧的采集时间（单调时钟，微秒）；优先用 v4l2 驱动时间戳 */
+int64_t capture_timestamp_us(const capture_t *c);
 
 /* 读取实际协商出来的分辨率（驱动可能不按请求给） */
 void capture_get_size(const capture_t *c, int *width, int *height);

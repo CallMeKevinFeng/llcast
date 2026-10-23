@@ -23,6 +23,7 @@
 #include <libavutil/opt.h>
 
 #include "capture.h"
+#include "overlay.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -192,6 +193,7 @@ int main(int argc, char **argv)
     int64_t total_bytes = ctx->extradata_size;
 
     for (int i = 0; i < NFRAMES; i++) {
+        int64_t frame_ts_us;
         if (have_capture) {
             int r = -EAGAIN;
             for (int tries = 0; tries < 5 && r == -EAGAIN; tries++)
@@ -200,10 +202,15 @@ int main(int argc, char **argv)
                 fprintf(stderr, "[warn] 取帧失败，改用合成帧\n");
                 have_capture = 0;
                 fill_frame(frame, i);
+                frame_ts_us = now_ns() / 1000;
+            } else {
+                frame_ts_us = capture_timestamp_us(cap);
             }
         } else {
             fill_frame(frame, i);
+            frame_ts_us = now_ns() / 1000;
         }
+        overlay_frame(frame, frame_ts_us, (uint64_t)i);
         frame->pts = i;
 
         int64_t t0 = now_ns();
