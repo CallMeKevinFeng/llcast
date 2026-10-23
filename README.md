@@ -1,53 +1,87 @@
-# llcast —— 低延迟管线第一块积木
+# llcast
 
-最短链路：合成帧 -> H.264 编码 -> Annex B 文件，并统计每帧 submit+drain 耗时。
+[![build](https://github.com/CallMeKevinFeng/llcast/actions/workflows/build.yml/badge.svg)](https://github.com/CallMeKevinFeng/llcast/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+低延迟音视频管线实验项目：用 C + FFmpeg/libav 从零搭建 **V4L2 采集 → H.264 编码 → WebRTC 出流** 的完整链路，目标是把局域网玻璃到玻璃延迟压到 300ms 以内，并给出可复测的弱网数据。
+
+A low-latency A/V pipeline in C: V4L2 capture → NVENC/x264 → (roadmap) RTP/WHIP.
+
+## 架构
+
+```
+V4L2 camera ──NV12──┐
+                    ├──▶ libav encoder ──▶ Annex B ──▶ [next] RTP / WHIP
+synthetic frames ───┘   h264_nvenc / libx264
+```
+
+摄像头只给 YUYV 时由 libswscale 转 NV12；无摄像头或打开失败时自动使用合成帧，方便在任何机器上验证管线。
+
+## 进度
+
+| 模块 | 状态 |
+|---|---|
+| V4L2 mmap 零拷贝采集（NV12 原生 / YUYV→NV12） | ✅ |
+| H.264 编码（NVENC `p1`+`ll`，libx264 自动回退） | ✅ |
+| Annex B 输出 + 每帧 submit+drain 耗时统计 | ✅ |
+| 画面毫秒计时器（玻璃到玻璃实测） | ⬜ |
+| RTP 打包 + WHIP 入流 | ⬜ |
+| 浏览器 WHEP 播放端 | ⬜ |
+| 弱网矩阵（tc netem 丢包/抖动/限速） | ⬜ |
 
 ## 构建
 
+依赖：CMake ≥ 3.16、FFmpeg 开发库（libavcodec / libavutil / libswscale）；NVENC 需要可用的 NVIDIA 驱动与 nv-codec-headers。
+
 ```bash
-cmake -S . -B build
+sudo apt install build-essential cmake pkg-config \
+  libavcodec-dev libavutil-dev libswscale-dev ffmpeg
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-./build/llcast_encode
 ```
 
-依赖：`libavcodec-dev`、`libavutil-dev`（FFmpeg 7.x，Ubuntu 26.04 自带）。
-需要 ffmpeg 编入 `h264_nvenc`（配合 nv-codec-headers）或 `libx264`。
-
-## 验证
+## 运行
 
 ```bash
-ffprobe -v error -f h264 -show_entries stream=codec_name,width,height -of default=noprint_wrappers=1 out.h264
-ffplay out.h264
+./build/llcast_encode                 # 合成帧
+./build/llcast_encode /dev/video0     # 摄像头（v4l2-ctl --list-devices 查看设备）
+ffplay out.h264                       # 回放输出
 ```
 
-看到移动的条纹和白条就说明管线通了。
+编码器选择顺序：`h264_nvenc` → `libx264`。前者要求 `nvidia-smi` 正常且进程能访问 `/dev/nvidia*`，否则自动回退。
 
-## 接真实摄像头
+## 实测
 
-```bash
-sudo apt install v4l2-utils   # 提供 v4l2-ctl 查看设备
-v4l2-ctl --list-devices
-./build/llcast_encode /dev/video0
-```
+环境：GTX 1080 Ti（GP102, Pascal）/ Ubuntu 26.04 LTS / FFmpeg 7.x
 
-采集模块用 v4l2 mmap 零拷贝，优先 NV12（直接喂 NVENC），摄像头只给 YUYV 时自动转 NV12；
-打开失败会回退到合成帧。只支持 MJPEG 的摄像头待后续加解码支持。
+| 路径 | 分辨率 | submit+drain (avg) | 备注 |
+|---|---|---|---|
+| libx264 ultrafast | 1280×720 | ~1.16 ms | 无 GPU 回退路径 |
+| h264_nvenc p1+ll | 1280×720 | 待桌面补测 | 需可访问 GPU |
 
-## 关于这台机器（RTX 1080 Ti / GP102 / Pascal）
+> submit+drain 是编码/提交路径耗时，不等于玻璃到玻璃延迟。后者 = 采集 + 编码 + 网络 + 抖动缓冲 + 解码 + 渲染。
 
-- NVENC 支持 H.264 与 H.265 8-bit 编码；不支持 AV1（AV1 编码需 RTX 40 系）。
-- Pascal 的 NVENC 没有 B 帧，画质是较老一代（Turing 之后在同码率下明显更好），
-  但低延迟场景 B 帧本来就是 0，所以不影响我们的目标。
-- 消费级卡 NVENC 并发会话数有限（Pascal 约 3 路），当前单路演示不受影响；
-  将来做多路转码再考虑这个限制。
+## 低延迟参数
 
-## 低延迟参数速查
+- GOP = 30（1 秒），B 帧 = 0
+- NVENC：`preset=p1`（最快）、`tune=ll`（低延迟）、`delay=0`、CBR 2 Mbps
+- x264 回退：`preset=ultrafast`、`tune=zerolatency`、`annexb=1`
 
-NVENC：`-preset p1 -tune ll -rc cbr -b:v 2M -g 30 -bf 0 -delay 0`
+## 设备说明（GTX 1080 Ti / GP102）
 
-## 下一步里程碑
+- NVENC 支持 H.264 / H.265 8-bit 编码，不支持 AV1（AV1 编码需 RTX 40 系及以后）
+- Pascal 无 B 帧，编码画质为较老一代；低延迟场景 B 帧本来就要为 0
+- 消费级卡并发 NVENC 会话数有限（约 3 路），多路转码时需注意
 
-1. v4l2 采集替换合成帧（`src/capture.c`）。
-2. RTP 打包 + WHIP 出流（`src/rtp.c`、`src/ingest.c`）。
-3. 毫秒计时器叠加到画面，做玻璃到玻璃实测。
-4. tc netem 丢包注入 + 弱网矩阵，产出延迟/卡顿数据表。
+## 路线图
+
+- [x] 采集 + 编码骨架
+- [ ] 毫秒计时器叠加，玻璃到玻璃实测
+- [ ] RTP/WHIP 出流 + WHEP 播放
+- [ ] 弱网矩阵与延迟/卡顿曲线
+- [ ] 图传模式（嵌入式 / RK3588 / Jetson）
+
+## 许可
+
+[MIT](LICENSE) © 2026 CallMeKevinFeng

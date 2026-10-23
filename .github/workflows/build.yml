@@ -1,0 +1,31 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libavcodec-dev libavutil-dev libswscale-dev ffmpeg
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Smoke test (synthetic frames, x264 fallback)
+        run: |
+          ./build/llcast_encode
+          ffprobe -v error -f h264 \
+            -show_entries stream=codec_name,width,height \
+            -of default=noprint_wrappers=1 out.h264
