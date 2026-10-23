@@ -1,0 +1,6 @@
+build/
+out.h264
+*.o
+*.log
+*.mp4
+.DS_Store
