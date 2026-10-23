@@ -24,7 +24,8 @@ jobs:
 
       - name: Configure
         run: |
-          export PKG_CONFIG_PATH="$CONDA_PREFIX/lib/pkgconfig"
+          export PREFIX="$MAMBA_ROOT_PREFIX/envs/ci"
+          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
@@ -32,7 +33,9 @@ jobs:
 
       - name: Smoke test (synthetic frames, x264 fallback)
         run: |
-          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export PREFIX="$MAMBA_ROOT_PREFIX/envs/ci"
+          export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export PATH="$PREFIX/bin:$PATH"
           ./build/llcast_encode
           ffprobe -v error -f h264 \
             -show_entries stream=codec_name,width,height \
