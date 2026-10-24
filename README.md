@@ -21,7 +21,7 @@ synthetic frames ───┘   h264_nvenc / libx264
 
 | 模块 | 状态 |
 |---|---|
-| V4L2 mmap 零拷贝采集（NV12 原生 / YUYV→NV12） | ✅ |
+| V4L2 mmap 采集（NV12 / YUYV→NV12 / MJPEG 解码） | ✅ |
 | H.264 编码（NVENC `p1`+`ll`，libx264 自动回退） | ✅ |
 | Annex B 输出 + 每帧 submit+drain 耗时统计 | ✅ |
 | 画面毫秒计时器（玻璃到玻璃实测） | ✅ |
@@ -50,6 +50,8 @@ ffplay out.h264                       # 回放输出
 ```
 
 编码器选择顺序：`h264_nvenc` → `libx264`。前者要求 `nvidia-smi` 正常且进程能访问 `/dev/nvidia*`，否则自动回退。
+
+采集侧支持 NV12、YUYV、MJPEG：NV12 直接喂编码器，YUYV 和 MJPEG 自动转成 NV12；摄像头打开失败时回退合成帧。
 
 ## 实测
 

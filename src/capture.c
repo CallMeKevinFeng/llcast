@@ -1,11 +1,13 @@
 /*
- * capture.c —— v4l2 mmap 零拷贝采集
+ * capture.c —— v4l2 mmap 采集
  *
- * 流程：open -> VIDIOC_S_FMT 协商格式 -> VIDIOC_REQBUFS + mmap ->
- *       VIDIOC_QBUF 全部入队 -> VIDIOC_STREAMON -> 循环 DQBUF/QBUF。
+ * 支持的格式：
+ *   NV12  直接喂 NVENC，零转换
+ *   YUYV  libswscale 转 NV12
+ *   MJPEG libavcodec 解码后经 libswscale 转 NV12（多数 UVC 摄像头只给 MJPEG）
  *
- * 摄像头最常给 YUYV，少数给 NV12；这里优先 NV12（直接喂 NVENC），
- * YUYV 则用 libswscale 转成 NV12。只支持 MJPEG 的摄像头以后再补（需要先解码）。
+ * 流程：open -> VIDIOC_S_FMT 协商格式 -> 初始化转换/解码 -> REQBUFS + mmap ->
+ *       QBUF 全部入队 -> STREAMON -> 循环 DQBUF/QBUF。
  */
 
 #include "capture.h"
@@ -23,6 +25,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 
 #define NBUF 4
@@ -39,7 +42,15 @@ struct capture {
     size_t bytesperline;    /* 原生行跨度 */
     struct buf bufs[NBUF];
     unsigned nbuf;
-    struct SwsContext *sws; /* YUYV -> NV12，NV12 原生时为 NULL */
+
+    struct SwsContext *sws;      /* 任意源格式 -> NV12 */
+    enum AVPixelFormat sws_src;  /* 当前 sws 的源格式 */
+    int sws_ready;
+
+    AVCodecContext *dec;  /* MJPEG 解码器 */
+    AVPacket *pkt;
+    AVFrame *dec_frame;
+
     int64_t last_ts_us;
 };
 
@@ -57,6 +68,16 @@ static int xioctl(int fd, unsigned long req, void *arg)
         r = ioctl(fd, req, arg);
     } while (r == -1 && errno == EINTR);
     return r;
+}
+
+static const char *fmt_name(uint32_t f)
+{
+    switch (f) {
+    case V4L2_PIX_FMT_NV12: return "NV12";
+    case V4L2_PIX_FMT_YUYV: return "YUYV";
+    case V4L2_PIX_FMT_MJPEG: return "MJPEG";
+    default: return "unknown";
+    }
 }
 
 capture_t *capture_open(const char *device, int width, int height)
@@ -87,40 +108,71 @@ capture_t *capture_open(const char *device, int width, int height)
         goto fail;
     }
 
-    /* 先请求 NV12；多数 UVC 驱动会回退到自己的默认格式而不是报错 */
+    /* 依次尝试 NV12、YUYV、MJPEG；驱动也可能静默换成自己的默认格式 */
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     fmt.fmt.pix.width = width;
     fmt.fmt.pix.height = height;
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
     fmt.fmt.pix.field = V4L2_FIELD_NONE;
-    if (xioctl(c->fd, VIDIOC_S_FMT, &fmt) < 0) {
+
+    const uint32_t try_fmts[] = { V4L2_PIX_FMT_NV12, V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_MJPEG };
+    int fmt_ok = 0;
+    for (size_t i = 0; i < sizeof(try_fmts) / sizeof(try_fmts[0]); i++) {
+        fmt.fmt.pix.pixelformat = try_fmts[i];
+        if (xioctl(c->fd, VIDIOC_S_FMT, &fmt) == 0) {
+            fmt_ok = 1;
+            break;
+        }
+    }
+    if (!fmt_ok) {
         perror("VIDIOC_S_FMT");
         goto fail;
     }
 
-    if (fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_NV12) {
-        c->src_pixfmt = V4L2_PIX_FMT_NV12;
-    } else if (fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV) {
-        /* 驱动回退到了 YUYV，明确再请求一次，确保格式稳定 */
-        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
-        if (xioctl(c->fd, VIDIOC_S_FMT, &fmt) < 0) {
-            perror("VIDIOC_S_FMT(YUYV)");
-            goto fail;
-        }
-        c->src_pixfmt = fmt.fmt.pix.pixelformat;
-    } else {
-        fprintf(stderr, "%s 不支持 NV12/YUYV，协商到 0x%08x\n",
-                device, fmt.fmt.pix.pixelformat);
+    c->src_pixfmt = fmt.fmt.pix.pixelformat;
+    if (c->src_pixfmt != V4L2_PIX_FMT_NV12 &&
+        c->src_pixfmt != V4L2_PIX_FMT_YUYV &&
+        c->src_pixfmt != V4L2_PIX_FMT_MJPEG) {
+        fprintf(stderr, "%s 不支持 NV12/YUYV/MJPEG，协商到 0x%08x\n",
+                device, c->src_pixfmt);
         goto fail;
     }
 
     c->width = fmt.fmt.pix.width;
     c->height = fmt.fmt.pix.height;
     c->bytesperline = fmt.fmt.pix.bytesperline;
-    fprintf(stderr, "[capture] %s: %dx%d, 格式 0x%08x\n",
-            device, c->width, c->height, c->src_pixfmt);
+    fprintf(stderr, "[capture] %s: %dx%d, 格式 %s\n",
+            device, c->width, c->height, fmt_name(c->src_pixfmt));
+
+    if (c->src_pixfmt == V4L2_PIX_FMT_YUYV) {
+        c->sws = sws_getContext(c->width, c->height, AV_PIX_FMT_YUYV422,
+                                c->width, c->height, AV_PIX_FMT_NV12,
+                                SWS_FAST_BILINEAR, NULL, NULL, NULL);
+        c->sws_src = AV_PIX_FMT_YUYV422;
+        c->sws_ready = 1;
+        if (!c->sws) {
+            fprintf(stderr, "创建 swscale 上下文失败\n");
+            goto fail;
+        }
+    } else if (c->src_pixfmt == V4L2_PIX_FMT_MJPEG) {
+        const AVCodec *dec_codec = avcodec_find_decoder(AV_CODEC_ID_MJPEG);
+        if (!dec_codec) {
+            fprintf(stderr, "找不到 MJPEG 解码器\n");
+            goto fail;
+        }
+        c->dec = avcodec_alloc_context3(dec_codec);
+        c->pkt = av_packet_alloc();
+        c->dec_frame = av_frame_alloc();
+        if (!c->dec || !c->pkt || !c->dec_frame) {
+            fprintf(stderr, "分配 MJPEG 解码资源失败\n");
+            goto fail;
+        }
+        if (avcodec_open2(c->dec, dec_codec, NULL) < 0) {
+            fprintf(stderr, "打开 MJPEG 解码器失败\n");
+            goto fail;
+        }
+    }
 
     struct v4l2_requestbuffers req;
     memset(&req, 0, sizeof(req));
@@ -167,16 +219,6 @@ capture_t *capture_open(const char *device, int width, int height)
         goto fail;
     }
 
-    if (c->src_pixfmt == V4L2_PIX_FMT_YUYV) {
-        c->sws = sws_getContext(c->width, c->height, AV_PIX_FMT_YUYV422,
-                                c->width, c->height, AV_PIX_FMT_NV12,
-                                SWS_FAST_BILINEAR, NULL, NULL, NULL);
-        if (!c->sws) {
-            fprintf(stderr, "创建 swscale 上下文失败\n");
-            goto fail;
-        }
-    }
-
     return c;
 
 fail:
@@ -206,6 +248,54 @@ int capture_get_frame(capture_t *c, AVFrame *frame)
         c->last_ts_us = now_us();
 
     const uint8_t *src = c->bufs[b.index].start;
+
+    if (c->src_pixfmt == V4L2_PIX_FMT_MJPEG) {
+        int size = b.bytesused ? (int)b.bytesused : (int)b.length;
+        if (av_new_packet(c->pkt, size) < 0) {
+            xioctl(c->fd, VIDIOC_QBUF, &b);
+            return -ENOMEM;
+        }
+        memcpy(c->pkt->data, src, size);
+        /* 立即归还采集缓冲：解码在应用层做，不占用驱动队列 */
+        xioctl(c->fd, VIDIOC_QBUF, &b);
+
+        int ret = avcodec_send_packet(c->dec, c->pkt);
+        if (ret < 0) {
+            av_packet_unref(c->pkt);
+            return ret;
+        }
+        ret = avcodec_receive_frame(c->dec, c->dec_frame);
+        if (ret == AVERROR(EAGAIN)) {
+            av_packet_unref(c->pkt);
+            return -EAGAIN;
+        }
+        if (ret < 0) {
+            av_packet_unref(c->pkt);
+            return ret;
+        }
+
+        if (!c->sws_ready || c->sws_src != c->dec_frame->format) {
+            if (c->sws)
+                sws_freeContext(c->sws);
+            c->sws = sws_getContext(c->width, c->height, c->dec_frame->format,
+                                    c->width, c->height, AV_PIX_FMT_NV12,
+                                    SWS_FAST_BILINEAR, NULL, NULL, NULL);
+            c->sws_src = c->dec_frame->format;
+            c->sws_ready = 1;
+            if (!c->sws) {
+                av_frame_unref(c->dec_frame);
+                av_packet_unref(c->pkt);
+                return -EINVAL;
+            }
+        }
+
+        sws_scale(c->sws, (const uint8_t * const *)c->dec_frame->data,
+                  c->dec_frame->linesize, 0, c->height,
+                  frame->data, frame->linesize);
+        av_frame_unref(c->dec_frame);
+        av_packet_unref(c->pkt);
+        return 0;
+    }
 
     if (c->src_pixfmt == V4L2_PIX_FMT_NV12) {
         for (int y = 0; y < c->height; y++)
@@ -252,6 +342,9 @@ void capture_close(capture_t *c)
             munmap(c->bufs[i].start, c->bufs[i].length);
     if (c->sws)
         sws_freeContext(c->sws);
+    av_frame_free(&c->dec_frame);
+    av_packet_free(&c->pkt);
+    avcodec_free_context(&c->dec);
     if (c->fd >= 0)
         close(c->fd);
     free(c);
