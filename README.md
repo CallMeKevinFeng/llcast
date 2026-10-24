@@ -69,6 +69,16 @@ ffplay out.h264                       # 回放输出
 
 页面显示本地时钟，和画面里烧录的采集时间对比即可估算玻璃到玻璃延迟；右侧会显示 fps、丢包和 jitter。
 
+> 当前 WHEP 直连已用 GStreamer 无头客户端验证（ICE completed、RTP 正常）；Chrome/Firefox 浏览器直连仍在调试 H264 caps 与 mDNS 候选问题，浏览器请先用下面的 MJPEG 预览。
+
+浏览器预览（MJPEG，兼容性优先、无转码）：
+
+```bash
+./tools/run_preview.sh /dev/video0 8090
+python3 -m http.server 8000
+# 打开 http://localhost:8000/player/preview.html
+```
+
 ## 实测
 
 环境：GTX 1080 Ti（GP102, Pascal）/ Ubuntu 26.04 LTS / FFmpeg 7.x
