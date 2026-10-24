@@ -26,6 +26,7 @@
 #include "overlay.h"
 
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +35,7 @@
 #define DEFAULT_W 1280
 #define DEFAULT_H 720
 #define FPS 30
-#define NFRAMES 300
+#define DEFAULT_FRAMES 300
 
 static int64_t now_ns(void)
 {
@@ -122,7 +123,24 @@ static int cmp_double(const void *a, const void *b)
 
 int main(int argc, char **argv)
 {
-    const char *device = argc > 1 ? argv[1] : NULL;
+    const char *device = NULL;
+    int pipe_out = 0;
+    long max_frames = DEFAULT_FRAMES;
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--pipe")) {
+            pipe_out = 1;
+        } else if (!strcmp(argv[i], "--frames") && i + 1 < argc) {
+            max_frames = atol(argv[++i]);
+        } else if (!device) {
+            device = argv[i];
+        } else {
+            fprintf(stderr, "未知参数: %s\n", argv[i]);
+            return 1;
+        }
+    }
+    signal(SIGPIPE, SIG_IGN);
+
     capture_t *cap = NULL;
     int w = DEFAULT_W, h = DEFAULT_H;
     int have_capture = 0;
@@ -132,7 +150,7 @@ int main(int argc, char **argv)
         if (cap) {
             capture_get_size(cap, &w, &h);
             have_capture = 1;
-            printf("[capture] 使用 %s: %dx%d\n", device, w, h);
+            fprintf(stderr, "[capture] 使用 %s: %dx%d\n", device, w, h);
         } else {
             fprintf(stderr, "[warn] 打开摄像头 %s 失败，回退到合成帧\n", device);
         }
@@ -163,7 +181,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "没有可用的 H.264 编码器，请确认 ffmpeg 编入了 nvenc 或 libx264\n");
         return 1;
     }
-    printf("使用编码器: %s\n", codec->name);
+    fprintf(stderr, "使用编码器: %s\n", codec->name);
 
     AVFrame *frame = av_frame_alloc();
     if (!frame)
@@ -176,23 +194,30 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    FILE *out = fopen("out.h264", "wb");
-    if (!out) {
-        perror("fopen out.h264");
-        return 1;
+    FILE *out;
+    if (pipe_out) {
+        out = stdout;
+        setvbuf(out, NULL, _IONBF, 0);
+    } else {
+        out = fopen("out.h264", "wb");
+        if (!out) {
+            perror("fopen out.h264");
+            return 1;
+        }
     }
 
     /* NVENC 的 extradata 是 Annex B 的 SPS/PPS，直接写；x264 已通过 annexb=1 统一 */
     if (ctx->extradata && ctx->extradata_size)
         fwrite(ctx->extradata, 1, ctx->extradata_size, out);
 
-    double *lats = calloc(NFRAMES, sizeof(double));
+    long lat_cap = max_frames > 0 ? max_frames : 100000;
+    double *lats = calloc(lat_cap, sizeof(double));
     if (!lats)
         return 1;
     int n = 0;
     int64_t total_bytes = ctx->extradata_size;
 
-    for (int i = 0; i < NFRAMES; i++) {
+    for (int i = 0; max_frames == 0 || i < max_frames; i++) {
         int64_t frame_ts_us;
         if (have_capture) {
             int r = -EAGAIN;
@@ -228,20 +253,28 @@ int main(int argc, char **argv)
         total_bytes += drain(ctx, out);
         int64_t t1 = now_ns();
 
-        lats[n++] = (double)(t1 - t0) / 1000.0; /* 微秒 */
+        double lat_us = (double)(t1 - t0) / 1000.0; /* 微秒 */
+        if (n < lat_cap)
+            lats[n++] = lat_us;
         if ((i + 1) % 60 == 0)
-            printf("frame %4d  submit+drain %.1f us\n", i + 1, lats[n - 1]);
+            fprintf(stderr, "frame %4d  submit+drain %.1f us\n", i + 1, lat_us);
     }
 
     /* flush：送入 NULL，把编码器内部剩余的包全部取出 */
     avcodec_send_frame(ctx, NULL);
     total_bytes += drain(ctx, out);
 
-    fclose(out);
+    if (pipe_out)
+        fflush(out);
+    else
+        fclose(out);
     if (cap)
         capture_close(cap);
     av_frame_free(&frame);
     avcodec_free_context(&ctx);
+
+    if (n <= 0)
+        return 0;
 
     double sum = 0, mx = 0;
     for (int i = 0; i < n; i++) {
@@ -253,13 +286,13 @@ int main(int argc, char **argv)
     memcpy(sorted, lats, n * sizeof(double));
     qsort(sorted, n, sizeof(double), cmp_double);
 
-    printf("---\n");
-    printf("帧数: %d\n", n);
-    printf("submit+drain 耗时  avg=%.1f us  p50=%.1f us  p95=%.1f us  max=%.1f us\n",
-           sum / n, sorted[n / 2], sorted[(int)(n * 0.95)], mx);
-    printf("输出: out.h264  %.2f MB  (%.2f Mbps)\n",
-           total_bytes / 1000000.0, total_bytes * 8.0 / (NFRAMES / (double)FPS) / 1000000.0);
-    printf("说明: 这是编码/提交路径耗时，玻璃到玻璃延迟还需叠加采集、网络、抖动缓冲、解码、渲染\n");
+    fprintf(stderr, "---\n");
+    fprintf(stderr, "帧数: %d\n", n);
+    fprintf(stderr, "submit+drain 耗时  avg=%.1f us  p50=%.1f us  p95=%.1f us  max=%.1f us\n",
+            sum / n, sorted[n / 2], sorted[(int)(n * 0.95)], mx);
+    fprintf(stderr, "输出: %s %.2f MB\n",
+            pipe_out ? "stdout" : "out.h264", total_bytes / 1000000.0);
+    fprintf(stderr, "说明: 这是编码/提交路径耗时，玻璃到玻璃延迟还需叠加采集、网络、抖动缓冲、解码、渲染\n");
 
     free(lats);
     free(sorted);

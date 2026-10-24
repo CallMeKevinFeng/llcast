@@ -5,14 +5,14 @@
 
 低延迟音视频管线实验项目：用 C + FFmpeg/libav 从零搭建 **V4L2 采集 → H.264 编码 → WebRTC 出流** 的完整链路，目标是把局域网玻璃到玻璃延迟压到 300ms 以内，并给出可复测的弱网数据。
 
-A low-latency A/V pipeline in C: V4L2 capture → NVENC/x264 → (roadmap) RTP/WHIP.
+A low-latency A/V pipeline in C: V4L2 capture → NVENC/x264 → WebRTC/WHEP.
 
 ## 架构
 
 ```
 V4L2 camera ──NV12──┐
-                    ├──▶ libav encoder ──▶ Annex B ──▶ [next] RTP / WHIP
-synthetic frames ───┘   h264_nvenc / libx264
+                    ├──▶ libav encoder ──▶ Annex B ──▶ llcast_whep ──WHEP──▶ 浏览器
+synthetic frames ───┘   h264_nvenc / libx264   appsrc → rtph264pay → webrtcbin
 ```
 
 摄像头只给 YUYV 时由 libswscale 转 NV12；无摄像头或打开失败时自动使用合成帧，方便在任何机器上验证管线。
@@ -25,8 +25,8 @@ synthetic frames ───┘   h264_nvenc / libx264
 | H.264 编码（NVENC `p1`+`ll`，libx264 自动回退） | ✅ |
 | Annex B 输出 + 每帧 submit+drain 耗时统计 | ✅ |
 | 画面毫秒计时器（玻璃到玻璃实测） | ✅ |
-| RTP 打包 + WHIP 入流 | ⬜ |
-| 浏览器 WHEP 播放端 | ⬜ |
+| 浏览器 WHEP 播放（GStreamer webrtcbin） | ✅ |
+| WHIP 入流（推流到媒体服务器） | ⬜ |
 | 弱网矩阵（tc netem 丢包/抖动/限速） | ⬜ |
 
 ## 构建
@@ -41,6 +41,13 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
+`llcast_whep` 需要 GStreamer 开发包（CMake 自动检测，缺失时只跳过该目标）：
+
+```bash
+sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  libgstreamer-plugins-bad1.0-dev gstreamer1.0-nice
+```
+
 ## 运行
 
 ```bash
@@ -53,6 +60,15 @@ ffplay out.h264                       # 回放输出
 
 采集侧支持 NV12、YUYV、MJPEG：NV12 直接喂编码器，YUYV 和 MJPEG 自动转成 NV12；摄像头打开失败时回退合成帧。
 
+摄像头直连浏览器（单观看者）：
+
+```bash
+./tools/run_whep.sh /dev/video0 8080
+# 浏览器打开 http://localhost:8080
+```
+
+页面显示本地时钟，和画面里烧录的采集时间对比即可估算玻璃到玻璃延迟；右侧会显示 fps、丢包和 jitter。
+
 ## 实测
 
 环境：GTX 1080 Ti（GP102, Pascal）/ Ubuntu 26.04 LTS / FFmpeg 7.x
@@ -63,6 +79,8 @@ ffplay out.h264                       # 回放输出
 | h264_nvenc p1+ll | 1280×720 | 待桌面补测 | 需可访问 GPU |
 
 > submit+drain 是编码/提交路径耗时，不等于玻璃到玻璃延迟。后者 = 采集 + 编码 + 网络 + 抖动缓冲 + 解码 + 渲染。
+
+WHEP 无头验证：ICE 状态 `completed`，6 秒收到 3115 个 RTP 包（720p30，NVENC）。
 
 ## 低延迟参数
 
@@ -87,7 +105,8 @@ ffplay out.h264                       # 回放输出
 - [x] 采集 + 编码骨架
 - [x] 毫秒计时器叠加
 - [ ] 玻璃到玻璃实测与数据表
-- [ ] RTP/WHIP 出流 + WHEP 播放
+- [x] WHEP 直连浏览器播放
+- [ ] WHIP 推流到媒体服务器
 - [ ] 弱网矩阵与延迟/卡顿曲线
 - [ ] 图传模式（嵌入式 / RK3588 / Jetson）
 
