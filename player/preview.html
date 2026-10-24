@@ -16,13 +16,15 @@
 </head>
 <body>
 <main>
-  <img id="cam" src="http://127.0.0.1:8090/" alt="camera">
+  <img id="cam" alt="camera">
   <div class="bar"><span id="clock">--:--:--.---</span></div>
   <p class="hint">MJPEG 直出预览（兼容性优先，无转码）。断开后会自动重连；用于快速确认画面与采集链路。</p>
 </main>
 <script>
 const cam = document.getElementById('cam');
 const clock = document.getElementById('clock');
+const host = location.hostname || '127.0.0.1';
+cam.src = `http://${host}:8090/`;
 function nowText() {
   const d = new Date();
   return d.toLocaleTimeString('zh-CN', { hour12: false }) + '.' +
@@ -30,7 +32,7 @@ function nowText() {
 }
 setInterval(() => { clock.textContent = nowText(); }, 10);
 cam.onerror = () => setTimeout(() => {
-  cam.src = 'http://127.0.0.1:8090/?t=' + Date.now();
+  cam.src = `http://${host}:8090/?t=${Date.now()}`;
 }, 1000);
 </script>
 </body>

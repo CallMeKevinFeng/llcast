@@ -11,6 +11,9 @@ add_executable(llcast_encode src/encode_nvenc.c src/capture.c src/overlay.c)
 target_link_libraries(llcast_encode PkgConfig::LIBAV)
 target_compile_options(llcast_encode PRIVATE -Wall -Wextra -O2)
 
+add_executable(llcast_mjpeg src/mjpeg_server.c)
+target_compile_options(llcast_mjpeg PRIVATE -Wall -Wextra -O2)
+
 pkg_check_modules(GST QUIET IMPORTED_TARGET
   gstreamer-1.0 gstreamer-app-1.0 gstreamer-webrtc-1.0 gstreamer-sdp-1.0 gio-2.0)
 if(GST_FOUND)
