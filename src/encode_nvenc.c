@@ -130,12 +130,25 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pipe")) {
             pipe_out = 1;
-        } else if (!strcmp(argv[i], "--frames") && i + 1 < argc) {
-            max_frames = atol(argv[++i]);
+        } else if (!strcmp(argv[i], "--frames")) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--frames 缺少参数\n");
+                return 1;
+            }
+            char *end = NULL;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || v < 0) {
+                fprintf(stderr, "--frames 参数非法: %s\n", argv[i]);
+                return 1;
+            }
+            max_frames = v;
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "未知参数: %s\n", argv[i]);
+            return 1;
         } else if (!device) {
             device = argv[i];
         } else {
-            fprintf(stderr, "未知参数: %s\n", argv[i]);
+            fprintf(stderr, "多余参数: %s\n", argv[i]);
             return 1;
         }
     }
